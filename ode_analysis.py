@@ -16,9 +16,24 @@ from typing import Callable, Dict, List, Tuple
 
 import numpy as np
 
+# Настройка интерактивного backend для matplotlib ДО импорта pyplot
+plt = None
 try:
+    import matplotlib
+    # Попытка выбрать GUI backend, если текущий неинтерактивный
+    try:
+        current_backend = matplotlib.get_backend()
+    except Exception:
+        current_backend = ""
+    if not isinstance(current_backend, str) or "agg" in current_backend.lower():
+        for be in ("TkAgg", "Qt5Agg", "QtAgg", "WXAgg"):
+            try:
+                matplotlib.use(be, force=True)
+                break
+            except Exception:
+                continue
     import matplotlib.pyplot as plt
-except ImportError:  # pragma: no cover - matplotlib может отсутствовать в окружении
+except Exception:
     plt = None
 
 # Тип для функции правой части системы ОДУ: f(t, y) -> dy/dt
@@ -48,8 +63,8 @@ LORENZ_SCENARIOS = (
     },
     {
         "name": "Квазипериодический режим",
-        "description": "rho чуть выше критического ~24.74 - переход через бифуркацию, появляются колебания",
-        "params": {**LORENZ_BASE_PARAMS, "rho": 24.5},
+        "description": "предельный цикл",
+        "params": {**LORENZ_BASE_PARAMS, "rho": 24.06},
     },
     {
         "name": "Хаотический режим",
@@ -431,8 +446,10 @@ def plot_linear_error_summary(stats: List[SolverStats]) -> None:
         steps = [s.step for s in ordered]
         max_errors = [s.max_abs_error for s in ordered]
         rms_errors = [s.rms_error for s in ordered]
-        ax.loglog(steps, max_errors, marker="o", label=f"{method} max|error|")
-        ax.loglog(steps, rms_errors, marker="s", linestyle="--", label=f"{method} rms_error")
+        # ax.loglog(steps, max_errors, marker="o", label=f"{method} max|error|")
+        ax.plot(steps, max_errors, marker="o", label=f"{method} max|error|")
+        # ax.loglog(steps, rms_errors, marker="s", linestyle="--", label=f"{method} rms_error")
+        ax.plot(steps, rms_errors, marker="s", linestyle="--", label=f"{method} rms_error")
 
     ax.set_xlabel("Шаг интегрирования h")
     ax.set_ylabel("Погрешность")
@@ -578,6 +595,176 @@ def plot_lorenz_scenario_comparison(scenario_results: Dict[str, Dict[str, np.nda
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
 
 
+def plot_lorenz_attractor(params: Dict[str, float], h: float = 0.01, t_end: float = 60.0, transient: float = 10.0) -> None:
+    """
+    Строит 3D-аттрактор Лоренца и его 2D-проекции (x-z, x-y) при заданных параметрах.
+    Используется метод RK4, после отбрасывания переходного процесса.
+    """
+    if plt is None:
+        return
+
+    system = lorenz_system(**params)
+    steps = int((t_end - LORENZ_T0) / h)
+    ts, ys = integrate(system, LORENZ_T0, LORENZ_INITIAL_STATE.copy(), h, steps, rk4_step)
+    mask = ts >= transient
+    xs, ys_, zs = ys[mask, 0], ys[mask, 1], ys[mask, 2]
+
+    fig = plt.figure(figsize=(12, 4))
+    ax3d = fig.add_subplot(1, 3, 1, projection="3d")
+    ax3d.plot(xs, ys_, zs, linewidth=0.6)
+    ax3d.set_title(f"Лоренц 3D: sigma={params['sigma']}, beta={params['beta']}, rho={params['rho']}")
+    ax3d.set_xlabel("x")
+    ax3d.set_ylabel("y")
+    ax3d.set_zlabel("z")
+
+    ax_xz = fig.add_subplot(1, 3, 2)
+    ax_xz.plot(xs, zs, linewidth=0.6)
+    ax_xz.set_xlabel("x")
+    ax_xz.set_ylabel("z")
+    ax_xz.set_title("Проекция x-z")
+    ax_xz.grid(True, alpha=0.3)
+
+    ax_xy = fig.add_subplot(1, 3, 3)
+    ax_xy.plot(xs, ys_, linewidth=0.6)
+    ax_xy.set_xlabel("x")
+    ax_xy.set_ylabel("y")
+    ax_xy.set_title("Проекция x-y")
+    ax_xy.grid(True, alpha=0.3)
+
+    fig.suptitle("Аттрактор системы Лоренца", fontsize=13)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
+
+
+def interactive_linear_controls() -> None:
+    """
+    Интерактив: линейный осциллятор с ползунками для omega и шага h.
+    Отображает x(t) (RK4) и точное решение для сравнения.
+    """
+    if plt is None:
+        return
+    try:
+        from matplotlib.widgets import Slider
+    except Exception:
+        return
+
+    # Начальные значения
+    omega0 = LINEAR_PARAMS["omega"]
+    h0 = 0.02
+    t0 = LINEAR_PARAMS["t0"]
+    t_end = LINEAR_PARAMS["t_end"]
+
+    fig, ax = plt.subplots(figsize=(9, 4))
+    plt.subplots_adjust(left=0.1, bottom=0.28)
+    ax.grid(True, alpha=0.3)
+    ax.set_title("Линейный осциллятор: x(t) (RK4) vs точное")
+    ax.set_xlabel("t")
+    ax.set_ylabel("x(t)")
+
+    def compute(omega: float, h: float):
+        steps = max(1, int((t_end - t0) / h))
+        system = harmonic_oscillator(omega)
+        ts, ys = integrate(system, t0, LINEAR_INITIAL_STATE.copy(), h, steps, rk4_step)
+        exact = np.array([harmonic_exact_solution(t, omega, LINEAR_PARAMS["x0"], LINEAR_PARAMS["v0"])[0] for t in ts])
+        return ts, ys[:, 0], exact
+
+    ts, x_num, x_exact = compute(omega0, h0)
+    (line_num,) = ax.plot(ts, x_num, label="Численное (RK4)")
+    (line_exact,) = ax.plot(ts, x_exact, label="Точное", color="black", linewidth=1.2, alpha=0.8)
+    ax.legend(loc="upper right")
+
+    # Ползунки
+    ax_omega = plt.axes([0.1, 0.18, 0.8, 0.03])
+    ax_h = plt.axes([0.1, 0.12, 0.8, 0.03])
+
+    s_omega = Slider(ax_omega, "omega", 0.2, 4.0, valinit=omega0, valstep=0.01)
+    s_h = Slider(ax_h, "h", 0.005, 0.2, valinit=h0, valstep=0.001)
+
+    def on_change(val):
+        omega = float(s_omega.val)
+        h = float(s_h.val)
+        ts, x_num, x_exact = compute(omega, h)
+        line_num.set_data(ts, x_num)
+        line_exact.set_data(ts, x_exact)
+        ax.set_xlim(ts[0], ts[-1])
+        ymin = min(np.min(x_num), np.min(x_exact))
+        ymax = max(np.max(x_num), np.max(x_exact))
+        if ymin == ymax:
+            ymin -= 1.0
+            ymax += 1.0
+        ax.set_ylim(ymin, ymax)
+        fig.canvas.draw_idle()
+
+    s_omega.on_changed(on_change)
+    s_h.on_changed(on_change)
+
+
+def interactive_lorenz_controls() -> None:
+    """
+    Интерактив: система Лоренца с ползунками для sigma, rho, beta и шага h.
+    Отображает проекцию аттрактора (x, z) для наглядности и скорость обновления.
+    """
+    if plt is None:
+        return
+    try:
+        from matplotlib.widgets import Slider
+    except Exception:
+        return
+
+    sigma0 = LORENZ_BASE_PARAMS["sigma"]
+    beta0 = LORENZ_BASE_PARAMS["beta"]
+    rho0 = LORENZ_BASE_PARAMS["rho"]
+    h0 = 0.01
+    t0 = LORENZ_T0
+    t_end = 40.0  # поменьше для более быстрых обновлений
+    transient = 5.0
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    plt.subplots_adjust(left=0.22, bottom=0.28)
+    ax.grid(True, alpha=0.3)
+    ax.set_title("Лоренц: фазовый портрет (x, z)")
+    ax.set_xlabel("x")
+    ax.set_ylabel("z")
+
+    def compute(sigma: float, beta: float, rho: float, h: float):
+        steps = max(1, int((t_end - t0) / h))
+        system = lorenz_system(sigma=sigma, beta=beta, rho=rho)
+        ts, ys = integrate(system, t0, LORENZ_INITIAL_STATE.copy(), h, steps, rk4_step)
+        mask = ts >= transient
+        states = ys[mask]
+        if len(states) > 30000:
+            states = states[::max(1, len(states) // 30000)]
+        return states
+
+    states = compute(sigma0, beta0, rho0, h0)
+    (line_lorenz,) = ax.plot(states[:, 0], states[:, 2], linewidth=0.7)
+
+    # Ползунки (вертикальные слева и горизонтальный снизу)
+    ax_sigma = plt.axes([0.05, 0.60, 0.03, 0.30])
+    ax_rho = plt.axes([0.10, 0.60, 0.03, 0.30])
+    ax_beta = plt.axes([0.15, 0.60, 0.03, 0.30])
+    ax_h = plt.axes([0.22, 0.12, 0.7, 0.03])
+
+    s_sigma = Slider(ax_sigma, "sigma", 0.1, 20.0, valinit=sigma0, valstep=0.1, orientation="vertical")
+    s_rho = Slider(ax_rho, "rho", 0.0, 120.0, valinit=rho0, valstep=0.5, orientation="vertical")
+    s_beta = Slider(ax_beta, "beta", 0.5, 5.0, valinit=beta0, valstep=0.05, orientation="vertical")
+    s_h = Slider(ax_h, "h", 0.001, 0.05, valinit=h0, valstep=0.001)
+
+    def on_change(val):
+        sigma = float(s_sigma.val)
+        rho = float(s_rho.val)
+        beta = float(s_beta.val)
+        h = float(s_h.val)
+        states = compute(sigma, beta, rho, h)
+        line_lorenz.set_data(states[:, 0], states[:, 2])
+        ax.relim()
+        ax.autoscale()
+        fig.canvas.draw_idle()
+
+    s_sigma.on_changed(on_change)
+    s_rho.on_changed(on_change)
+    s_beta.on_changed(on_change)
+    s_h.on_changed(on_change)
+
 def main() -> None:
     """
     Главная функция программы.
@@ -624,13 +811,21 @@ def main() -> None:
         print(f"- {name}: {description} ({param_str})")
 
     if plt is None:
-        print("\nВизуализация недоступна: библиотека matplotlib не установлена.")
+        print("\nВизуализация недоступна: библиотека matplotlib не установлена или не найден GUI backend (Tk/Qt/WX).")
+        print("Установите один из GUI-бекендов, например:")
+        print("- python -m pip install tk   (для TkAgg, если нет Tkinter)")
+        print("- python -m pip install PyQt5 (для Qt5Agg)")
         return
 
     plot_linear_error_summary(oscillator_stats)
     plot_linear_time_series()
     plot_lorenz_phase_portraits(lorenz_results)
     plot_lorenz_scenario_comparison(scenario_results)
+    # Явное построение аттрактора Лоренца при sigma=10, beta=8/3, rho=28
+    plot_lorenz_attractor({"sigma": 10.0, "beta": 8.0 / 3.0, "rho": 28.0}, h=0.01, t_end=60.0, transient=10.0)
+    # Интерактивные панели управления (откроются отдельными окнами)
+    # interactive_linear_controls()
+    # interactive_lorenz_controls()
     plt.show()
 
 
